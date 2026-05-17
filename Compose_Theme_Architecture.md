@@ -83,7 +83,7 @@ object MivioTheme {
 }
 ``` 
 
-Bước 3: Cách sử dụng trong Giao diện
+### Bước 3: Cách sử dụng trong Giao diện
 Bọc ứng dụng bằng MivioTheme tại MainActivity, sau đó ở các Component:
 
 Dùng màu chuẩn: `MaterialTheme.colorScheme.primary`
