@@ -21,7 +21,7 @@ Dưới đây là sự phân định rạch ròi chức năng, nhiệm vụ củ
 * **Thành phần chính:**
 * **Entities (Models):** Các đối tượng dữ liệu lõi (ví dụ: `User`, `Order`).
 * **Use Cases (Interactors):** Mỗi class đại diện cho một hành động duy nhất của hệ thống (ví dụ: `ValidateLoginUseCase`, `CalculateTaxUseCase`).
-* **Repository Interfaces:** Giao ước quy định cách lấy dữ liệu (Ví dụ: `interface IUserRepository { fun getUser(): User }`).
+* **Repository Interfaces:** Giao ước quy định cách lấy dữ liệu (Ví dụ: `interface UserRepository { fun getUser(): User }`).
 
 
 
