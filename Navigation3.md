@@ -273,3 +273,177 @@ fun MainScreenWithBottomNav() {
 }
 
 ```
+
+## Xử lý Deep Link (từ app khác) hoặc mở app từ Notification
+
+Ở Nav 2, hệ thống dùng "magic" ngầm để tự build backstack dựa vào khai báo trong XML hoặc `navDeepLink`. Nhưng ở Nav 3, vì **State chỉ là một danh sách các `NavKey**`, quyền quyết định nằm hoàn toàn trong tay.
+
+Đây là cách tư duy và triển khai chuẩn Senior cho bài toán này:
+
+---
+
+### Tư duy cốt lõi: "Synthetic Backstack" (Backstack giả lập)
+
+Khi user bấm vào Notification báo "Đơn hàng #123 đã giao", nếu chỉ push `OrderDetailKey("123")` vào stack trống, khi user bấm nút "Back", app sẽ thoát (thoát luôn ra màn hình Home của điện thoại). Trải nghiệm này rất tệ.
+
+**Mục tiêu:** Khi mở từ Notification/DeepLink, phải chủ động build một **List các NavKey** (Ví dụ: `[HomeKey, OrderListKey, OrderDetailKey("123")]`). Nhờ vậy, khi user back lại, họ sẽ rớt về `OrderList`, rồi về `Home`.
+
+---
+
+### Bước 1: Nâng cấp `AppNavigator` để hỗ trợ DeepLink
+
+Chúng ta thêm một action mới vào luồng điều hướng để cho phép reset toàn bộ stack bằng một danh sách Key mới.
+
+```kotlin
+sealed interface NavAction {
+    data class Navigate(val key: NavKey) : NavAction
+    data object Pop : NavAction
+    data object PopToRoot : NavAction
+    // Action mới dành riêng cho DeepLink / Notification
+    data class HandleDeepLink(val keys: List<NavKey>) : NavAction 
+}
+
+interface AppNavigator {
+    // ... các hàm cũ
+    fun handleDeepLink(keys: List<NavKey>)
+}
+
+class AppNavigatorImpl : AppNavigator {
+    // ...
+    override fun handleDeepLink(keys: List<NavKey>) {
+        _navActions.tryEmit(NavAction.HandleDeepLink(keys))
+    }
+}
+
+```
+
+---
+
+### Bước 2: Tạo lớp phân tích Intent (Intent Parser)
+
+Tầng App (hoặc module `core:navigation`) sẽ chịu trách nhiệm bóc tách `Intent` từ `MainActivity` để convert thành danh sách `NavKey`.
+
+```kotlin
+object DeepLinkParser {
+    
+    fun parseIntent(intent: Intent): List<NavKey>? {
+        val uri = intent.data
+        val action = intent.action
+
+        // 1. Xử lý Notification (thường truyền qua Extras)
+        if (intent.hasExtra("notification_type")) {
+            val type = intent.getStringExtra("notification_type")
+            val id = intent.getStringExtra("target_id") ?: return null
+            
+            return when(type) {
+                "ORDER_UPDATE" -> listOf(HomeKey, OrderListKey, OrderDetailKey(id))
+                "NEW_MESSAGE" -> listOf(HomeKey, ChatDetailKey(id))
+                else -> listOf(HomeKey)
+            }
+        }
+
+        // 2. Xử lý Web DeepLink (VD: myapp://products/456)
+        if (uri != null && uri.scheme == "myapp") {
+            val path = uri.pathSegments
+            if (path.firstOrNull() == "products" && path.size == 2) {
+                val productId = path[1]
+                return listOf(HomeKey, ProductDetailKey(productId))
+            }
+        }
+
+        return null // Không phải deep link
+    }
+}
+
+```
+
+---
+
+### Bước 3: Đón Intent tại `MainActivity` và gắn vào Compose
+
+App có thể được mở mới (`onCreate`) hoặc đang chạy ngầm rồi được gọi lên (`onNewIntent`). Em cần bắt được ở cả 2 nơi và đẩy vào `AppNavigator`.
+
+```kotlin
+@AndroidEntryPoint // Nếu dùng Hilt
+class MainActivity : ComponentActivity() {
+
+    @Inject
+    lateinit var navigator: AppNavigator
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Xử lý Intent khi app mở mới (Cold Start)
+        handleIntent(intent)
+
+        setContent {
+            MainAppScreen(navigator = navigator)
+        }
+    }
+
+    // Xử lý Intent khi app đang chạy (Warm/Hot Start - SingleTop)
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        intent?.let { handleIntent(it) }
+    }
+
+    private fun handleIntent(intent: Intent) {
+        val keys = DeepLinkParser.parseIntent(intent)
+        if (keys != null && keys.isNotEmpty()) {
+            navigator.handleDeepLink(keys)
+        }
+    }
+}
+
+```
+
+---
+
+### Bước 4: Xử lý Action trong `NavBackStack`
+
+Cuối cùng, tại Composable gốc, em hứng `HandleDeepLink` và update State (xóa stack hiện tại và add danh sách mới vào).
+
+```kotlin
+@Composable
+fun MainAppScreen(navigator: AppNavigator) {
+    val backStack = rememberNavBackStack<NavKey>(HomeKey)
+
+    LaunchedEffect(Unit) {
+        navigator.navActions.collect { action ->
+            when (action) {
+                is NavAction.Navigate -> backStack.add(action.key)
+                is NavAction.Pop -> backStack.removeLast()
+                is NavAction.HandleDeepLink -> {
+                    // Dọn dẹp stack cũ
+                    while (backStack.isNotEmpty()) {
+                        backStack.removeLast()
+                    }
+                    // Bơm Synthetic Backstack mới vào
+                    action.keys.forEach { key ->
+                        backStack.add(key)
+                    }
+                }
+                // ...
+            }
+        }
+    }
+
+    NavDisplay(backStack = backStack, entryProvider = entryProvider { ... })
+}
+
+```
+
+---
+
+### 🔥 Các Tips Thực Chiến & Tối Ưu cho Senior
+
+1. **Kiểm soát "Append" vs "Replace" (Cực kỳ quan trọng):**
+Đôi khi user đang ở màn hình điền Form dở dang, tự nhiên có notification tin nhắn đến. Nếu em dùng logic `HandleDeepLink` ở trên (xóa toàn bộ stack), user sẽ **mất sạch dữ liệu Form**.
+* *Tip xử lý:* Trong `DeepLinkParser`, em có thể định nghĩa thêm flag. Ví dụ: tin nhắn thì chỉ cần *Push thêm* (`backStack.add()`), còn thông báo hệ thống (như tài khoản bị đăng xuất, đổi mật khẩu) thì mới *Replace/Reset* toàn bộ stack.
+
+
+2. **Push Notification Payload > URI Deep Link:**
+Để dễ bảo trì, thay vì config hệ thống backend bắn URI kiểu `myapp://order/123` vào Notification (rất dễ lỗi format), hãy thống nhất với backend gửi **JSON Key-Value qua FCM Data Message**. Dùng `Intent.extras` để lấy Data Message này parse thành `NavKey` sẽ an toàn về kiểu (type-safe) hơn nhiều so với việc cắt chuỗi (string parsing) từ URI.
+3. **Bảo mật Deep Link (Security Tip):**
+Vì Nav 3 để lộ hoàn toàn việc tạo Backstack, em có thể dễ dàng chèn một lớp **Middleware kiểm tra quyền** ngay trong `DeepLinkParser`.
+Ví dụ: Nếu URI trỏ tới màn `AdminDashboardKey` mà user hiện tại (lấy từ Session/Preferences) không có quyền, em trả về `listOf(HomeKey, UnauthorizedErrorKey)`. Việc này ở Nav 2 làm cực kỳ khổ (phải dùng NavOptions/Interceptor phức tạp).
